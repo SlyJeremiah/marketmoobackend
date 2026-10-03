@@ -1,6 +1,9 @@
 Django>=5.2,<5.3
 djangorestframework>=3.16,<3.19
+django-cors-headers>=4.6
+whitenoise>=6.8
 gunicorn>=23.0
-# PostgreSQL driver for Supabase (only needed when DATABASE_URL is set)
+# PostgreSQL driver (Neon) and Backblaze B2 through its S3-compatible API
 psycopg[binary]>=3.2
+boto3>=1.35
 # Planned (background jobs: outbreak alerts, pack builds): celery[redis]>=5.4
