@@ -16,5 +16,6 @@ urlpatterns = [
     path("v1/", include("health.urls")),
     path("v1/", include("packs.urls")),
     path("v1/", include("syncapi.urls")),
+    path("v1/", include("farms.urls")),
     path("v1/manager/", include("manager.urls")),
 ]

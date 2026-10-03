@@ -19,6 +19,8 @@ from rest_framework.views import APIView
 
 from health.models import OutbreakReport
 from market.geo import blur
+from farms.geometry import BoundaryError, validate_and_measure
+from farms.models import FarmBoundary
 from market.models import Listing
 from market.views import photo_key_for
 from records.models import FarmRecord, SyncOp
@@ -115,7 +117,32 @@ def apply_outbreak_report(user, entity_id, p):
                                   count=max(count, 1), lat=lat, lon=lon, description=str(p.get("description", ""))[:2000])
 
 
-HANDLERS = {"record": apply_record, "listing": apply_listing, "outbreak_report": apply_outbreak_report}
+def apply_farm_boundary(user, entity_id, p):
+    """One boundary per farmer. The server recomputes area and centroid and rejects implausible geometry."""
+    if p.get("deleted"):
+        FarmBoundary.objects.filter(owner=user).delete()
+        return
+    source = p.get("source", "drawn")
+    if source not in ("drawn", "shapefile"):
+        raise OpError("source must be drawn or shapefile")
+    try:
+        geom, area_ha, lat, lon, n = validate_and_measure(p.get("geometry"))
+    except BoundaryError as e:
+        raise OpError(str(e))
+    other = FarmBoundary.objects.filter(pk=entity_id).exclude(owner=user).exists()
+    if other:
+        raise OpError("not your boundary")
+    vals = dict(geometry=geom, area_ha=area_ha, centroid_lat=lat, centroid_lon=lon, vertex_count=n, source=source)
+    b = FarmBoundary.objects.filter(owner=user).first()
+    if b:
+        for k, v in vals.items():
+            setattr(b, k, v)
+        b.save()
+    else:
+        FarmBoundary.objects.create(pk=entity_id, owner=user, **vals)
+
+
+HANDLERS = {"record": apply_record, "listing": apply_listing, "outbreak_report": apply_outbreak_report, "farm_boundary": apply_farm_boundary}
 
 
 class SyncView(APIView):

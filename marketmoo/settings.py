@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     "packs",
     "syncapi",
     "manager",
+    "farms",
 ]
 
 MIDDLEWARE = [

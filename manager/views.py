@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 from accounts.models import User
 from health.models import Outbreak, OutbreakReport
 from health.views import OutbreakPublicSerializer
+from farms.models import FarmBoundary
 from market.models import Listing, Pool
 from market.serializers import PoolSerializer
 from packs.models import Pack
@@ -44,6 +45,7 @@ class StatsView(ManagerView):
                       "by_district": {r["district"]: r["n"] for r in User.objects.values("district").annotate(n=Count("pk"))}},
             "listings": {"by_status": by_status, "total": sum(by_status.values())},
             "records_total": FarmRecord.objects.count(),
+            "boundaries": {"count": FarmBoundary.objects.count(), "total_ha": round(FarmBoundary.objects.aggregate(t=dj.Sum("area_ha"))["t"] or 0, 1)},
             "reports": {"new": OutbreakReport.objects.filter(status="new").count(), "total": OutbreakReport.objects.count()},
             "outbreaks_active": Outbreak.objects.filter(status="verified").count(),
             "pools_open": Pool.objects.filter(status="open").count(),
