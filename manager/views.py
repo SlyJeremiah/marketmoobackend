@@ -10,7 +10,10 @@ from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.models import User
+import secrets
+
+from accounts.models import DISTRICTS, User, normalise_phone
+from rest_framework.authtoken.models import Token
 from health.models import Outbreak, OutbreakReport
 from health.views import OutbreakPublicSerializer
 from farms.models import FarmBoundary
@@ -89,8 +92,85 @@ class UsersView(ManagerView):
         if q:
             qs = qs.filter(phone__icontains=q)
         data = [{"id": u.id, "phone": u.phone, "role": u.role, "district": u.district, "verified": u.verified, "joined": u.date_joined,
+                 "has_password": u.has_usable_password(), "active": u.is_active, "staff": u.is_staff,
                  "listings": u.listings.count(), "records": u.records.count()} for u in qs[:200]]
         return Response({"count": qs.count(), "results": data})
+
+
+_PW_ALPHABET = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no look-alike characters (0 O 1 l I)
+
+
+def make_temp_password():
+    chunks = ["".join(secrets.choice(_PW_ALPHABET) for _ in range(4)) for _ in range(3)]
+    return "-".join(chunks)
+
+
+def _can_touch_staff(request, user):
+    """Only a superuser may create, reset or deactivate staff or admin accounts."""
+    return request.user.is_superuser or not (user.is_staff or user.role == User.Role.ADMIN)
+
+
+class UserCreateView(ManagerView):
+    """Create an account from the dashboard. The user can then sign in with phone and password, as well as by text code."""
+
+    def post(self, request):
+        raw = str(request.data.get("phone", "")).strip()
+        phone = normalise_phone(raw) if raw else ""
+        digits = "".join(c for c in phone if c.isdigit())
+        if not (9 <= len(digits) <= 15):
+            return Response({"detail": "Enter a valid phone number, for example +263771234567."}, status=status.HTTP_400_BAD_REQUEST)
+        if User.objects.filter(phone=phone).exists():
+            return Response({"detail": "A user with this phone number already exists."}, status=status.HTTP_409_CONFLICT)
+        role = request.data.get("role", "farmer")
+        if role not in {r.value for r in User.Role}:
+            return Response({"detail": "Unknown role."}, status=status.HTTP_400_BAD_REQUEST)
+        district = request.data.get("district", "other")
+        if district not in {d for d, _ in DISTRICTS}:
+            return Response({"detail": "Unknown district."}, status=status.HTTP_400_BAD_REQUEST)
+        if role == User.Role.ADMIN and not request.user.is_superuser:
+            return Response({"detail": "Only a superuser can create admin accounts."}, status=status.HTTP_403_FORBIDDEN)
+        provided = request.data.get("password")
+        if provided is not None and provided != "" and len(str(provided)) < 8:
+            return Response({"detail": "A password must be at least 8 characters."}, status=status.HTTP_400_BAD_REQUEST)
+        password = str(provided) if provided else make_temp_password()
+        u = User.objects.create_user(username=phone, password=password, phone=phone, role=role, district=district,
+                                     verified=bool(request.data.get("verified", False)), is_staff=(role == User.Role.ADMIN))
+        return Response({"id": u.id, "phone": u.phone, "role": u.role, "district": u.district,
+                         "temporary_password": None if provided else password,
+                         "note": "Shown once. Give it to the user; they can change it in the app under Account."}, status=status.HTTP_201_CREATED)
+
+
+class UserResetPasswordView(ManagerView):
+    def post(self, request, pk):
+        u = User.objects.filter(pk=pk).first()
+        if u is None:
+            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+        if not _can_touch_staff(request, u):
+            return Response({"detail": "Only a superuser can change staff accounts."}, status=status.HTTP_403_FORBIDDEN)
+        provided = request.data.get("password")
+        if provided and len(str(provided)) < 8:
+            return Response({"detail": "A password must be at least 8 characters."}, status=status.HTTP_400_BAD_REQUEST)
+        password = str(provided) if provided else make_temp_password()
+        u.set_password(password)
+        u.save(update_fields=["password"])
+        Token.objects.filter(user=u).delete()  # end existing sessions
+        return Response({"id": u.id, "phone": u.phone, "temporary_password": None if provided else password})
+
+
+class UserActiveView(ManagerView):
+    def post(self, request, pk):
+        u = User.objects.filter(pk=pk).first()
+        if u is None:
+            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+        if u.pk == request.user.pk:
+            return Response({"detail": "You cannot deactivate your own account."}, status=status.HTTP_400_BAD_REQUEST)
+        if not _can_touch_staff(request, u):
+            return Response({"detail": "Only a superuser can change staff accounts."}, status=status.HTTP_403_FORBIDDEN)
+        u.is_active = bool(request.data.get("active", True))
+        u.save(update_fields=["is_active"])
+        if not u.is_active:
+            Token.objects.filter(user=u).delete()
+        return Response({"id": u.id, "active": u.is_active})
 
 
 class UserVerifyView(ManagerView):

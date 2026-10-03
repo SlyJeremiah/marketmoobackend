@@ -123,3 +123,39 @@ class StaffLoginView(APIView):
             return Response({"detail": "Wrong username or password."}, status=status.HTTP_400_BAD_REQUEST)
         token, _ = Token.objects.get_or_create(user=user)
         return Response({"token": token.key, "profile": ProfileSerializer(user).data})
+
+
+class PasswordThrottle(AnonRateThrottle):
+    scope = "password_login"
+
+
+class PasswordLoginView(APIView):
+    """Phone number and password, for accounts a manager created. Works alongside the text-message code."""
+    permission_classes = [AllowAny]
+    authentication_classes: list = []
+    throttle_classes = [PasswordThrottle]
+
+    def post(self, request):
+        from django.contrib.auth import authenticate
+
+        phone = normalise_phone(str(request.data.get("phone", "")).strip() or "0")
+        user = authenticate(request, username=phone, password=str(request.data.get("password", "")))
+        if user is None or not user.is_active:
+            return Response({"detail": "Wrong phone number or password."}, status=status.HTTP_400_BAD_REQUEST)
+        token, _ = Token.objects.get_or_create(user=user)
+        return Response({"token": token.key, "created": False, "profile": ProfileSerializer(user).data})
+
+
+class ChangePasswordView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        new = str(request.data.get("new_password", ""))
+        if len(new) < 8:
+            return Response({"detail": "The new password must be at least 8 characters."}, status=status.HTTP_400_BAD_REQUEST)
+        # accounts that signed up by text code have no password yet, so the old one is only required if one exists
+        if request.user.has_usable_password() and not request.user.check_password(str(request.data.get("old_password", ""))):
+            return Response({"detail": "The current password is wrong."}, status=status.HTTP_400_BAD_REQUEST)
+        request.user.set_password(new)
+        request.user.save(update_fields=["password"])
+        return Response({"detail": "Password changed."})

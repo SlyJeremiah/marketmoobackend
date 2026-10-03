@@ -152,3 +152,105 @@ class PhotoAndStorageTests(TestCase):
             url = APIClient().get("/v1/packs/manifest").json()["packs"][0]["url"]
         self.assertEqual(url, "https://b2.example/signed")
         g.assert_called_once()
+
+
+def super_client(phone="+263770000077"):
+    User.objects.create_superuser(username=phone, phone=phone, password="pw-for-tests-only")
+    c = APIClient()
+    token = c.post("/v1/auth/staff-login", {"username": phone, "password": "pw-for-tests-only"}, format="json").json()["token"]
+    c.credentials(HTTP_AUTHORIZATION=f"Token {token}")
+    return c
+
+
+class UserManagementTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.mgr, self.mgr_user = staff_client()
+
+    def create(self, **over):
+        body = {"phone": "0771234567", "role": "farmer", "district": "gwanda"}
+        body.update(over)
+        return self.mgr.post("/v1/manager/users/create", body, format="json")
+
+    def test_create_user_generates_a_temporary_password_that_works_for_the_app(self):
+        r = self.create()
+        self.assertEqual(r.status_code, 201, r.content)
+        temp = r.json()["temporary_password"]
+        self.assertRegex(temp, r"^[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}$")
+        u = User.objects.get(phone="+263771234567")
+        self.assertEqual((u.role, u.district, u.is_staff), ("farmer", "gwanda", False))
+        # signs in with phone and password, in any phone format, alongside the text code
+        for phone in ("0771234567", "+263771234567"):
+            lg = APIClient().post("/v1/auth/login", {"phone": phone, "password": temp}, format="json")
+            self.assertEqual(lg.status_code, 200)
+        self.assertEqual(lg.json()["profile"]["district"], "gwanda")
+
+    def test_wrong_password_unknown_phone_and_inactive_are_refused_the_same_way(self):
+        temp = self.create().json()["temporary_password"]
+        c = APIClient()
+        self.assertEqual(c.post("/v1/auth/login", {"phone": "0771234567", "password": "nope-nope"}, format="json").status_code, 400)
+        self.assertEqual(c.post("/v1/auth/login", {"phone": "0779999999", "password": temp}, format="json").status_code, 400)
+        uid = User.objects.get(phone="+263771234567").id
+        self.mgr.post(f"/v1/manager/users/{uid}/active", {"active": False}, format="json")
+        self.assertEqual(c.post("/v1/auth/login", {"phone": "0771234567", "password": temp}, format="json").status_code, 400)
+
+    def test_chosen_password_is_not_echoed_and_must_be_long_enough(self):
+        self.assertEqual(self.create(password="short").status_code, 400)
+        r = self.create(password="a-long-password-1")
+        self.assertEqual(r.status_code, 201)
+        self.assertIsNone(r.json()["temporary_password"])
+        self.assertEqual(APIClient().post("/v1/auth/login", {"phone": "0771234567", "password": "a-long-password-1"}, format="json").status_code, 200)
+
+    def test_validation(self):
+        self.assertEqual(self.create(phone="12").status_code, 400)
+        self.assertEqual(self.create(role="king").status_code, 400)
+        self.assertEqual(self.create(district="mars").status_code, 400)
+        self.create()
+        self.assertEqual(self.create(phone="+263771234567").status_code, 409)  # same number, different format
+
+    def test_only_managers_can_create_and_only_superusers_make_admins(self):
+        farmer = login("+263772222222")
+        self.assertEqual(farmer.post("/v1/manager/users/create", {"phone": "0773000000"}, format="json").status_code, 403)
+        self.assertEqual(self.create(role="admin").status_code, 403)      # plain staff cannot
+        sup = super_client()
+        r = sup.post("/v1/manager/users/create", {"phone": "0773111111", "role": "admin"}, format="json")
+        self.assertEqual(r.status_code, 201)
+        self.assertTrue(User.objects.get(phone="+263773111111").is_staff)
+
+    def test_reset_password_ends_old_sessions_and_old_password(self):
+        first = self.create().json()["temporary_password"]
+        c = APIClient()
+        tok = c.post("/v1/auth/login", {"phone": "0771234567", "password": first}, format="json").json()["token"]
+        c.credentials(HTTP_AUTHORIZATION=f"Token {tok}")
+        self.assertEqual(c.get("/v1/auth/me").status_code, 200)
+        uid = User.objects.get(phone="+263771234567").id
+        new = self.mgr.post(f"/v1/manager/users/{uid}/reset-password", {}, format="json").json()["temporary_password"]
+        self.assertNotEqual(new, first)
+        self.assertEqual(c.get("/v1/auth/me").status_code, 401)
+        self.assertEqual(APIClient().post("/v1/auth/login", {"phone": "0771234567", "password": first}, format="json").status_code, 400)
+        self.assertEqual(APIClient().post("/v1/auth/login", {"phone": "0771234567", "password": new}, format="json").status_code, 200)
+
+    def test_staff_cannot_touch_other_staff_or_deactivate_themselves(self):
+        other, other_user = staff_client("+263770000042")
+        self.assertEqual(self.mgr.post(f"/v1/manager/users/{other_user.id}/reset-password", {}, format="json").status_code, 403)
+        self.assertEqual(self.mgr.post(f"/v1/manager/users/{other_user.id}/active", {"active": False}, format="json").status_code, 403)
+        self.assertEqual(self.mgr.post(f"/v1/manager/users/{self.mgr_user.id}/active", {"active": False}, format="json").status_code, 400)
+        self.assertEqual(super_client().post(f"/v1/manager/users/{other_user.id}/active", {"active": False}, format="json").status_code, 200)
+
+    def test_user_list_shows_password_and_active_flags_without_secrets(self):
+        self.create()
+        row = [u for u in self.mgr.get("/v1/manager/users").json()["results"] if u["phone"] == "+263771234567"][0]
+        self.assertTrue(row["has_password"])
+        self.assertTrue(row["active"])
+        self.assertNotIn("password", row)
+
+    def test_users_who_signed_up_by_text_code_have_no_password_until_they_set_one(self):
+        farmer = login("+263774444444")
+        row = [u for u in self.mgr.get("/v1/manager/users").json()["results"] if u["phone"] == "+263774444444"][0]
+        self.assertFalse(row["has_password"])
+        self.assertEqual(farmer.post("/v1/auth/password", {"new_password": "short"}, format="json").status_code, 400)
+        self.assertEqual(farmer.post("/v1/auth/password", {"new_password": "my-new-password-1"}, format="json").status_code, 200)
+        self.assertEqual(APIClient().post("/v1/auth/login", {"phone": "0774444444", "password": "my-new-password-1"}, format="json").status_code, 200)
+        # once a password exists, changing it needs the old one
+        self.assertEqual(farmer.post("/v1/auth/password", {"new_password": "another-one-123", "old_password": "wrong"}, format="json").status_code, 400)
+        self.assertEqual(farmer.post("/v1/auth/password", {"new_password": "another-one-123", "old_password": "my-new-password-1"}, format="json").status_code, 200)
