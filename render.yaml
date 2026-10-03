@@ -1,0 +1,31 @@
+# Render blueprint (free tier). Free web services sleep when idle: the first request can take tens of seconds,
+# which the Android app tolerates (60 s read timeout, exponential backoff, /v1/ping wake-up).
+services:
+  - type: web
+    name: marketmoo-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput
+    startCommand: python manage.py migrate --noinput && gunicorn marketmoo.wsgi:application --bind 0.0.0.0:$PORT --workers 2
+    healthCheckPath: /v1/ping
+    envVars:
+      - key: MARKETMOO_SECRET_KEY
+        generateValue: true
+      - key: MARKETMOO_ALLOWED_HOSTS
+        value: marketmoo-api.onrender.com
+      - key: DATABASE_URL
+        sync: false
+      - key: B2_KEY_ID
+        sync: false
+      - key: B2_APP_KEY
+        sync: false
+      - key: B2_BUCKET
+        value: marketmoo
+      - key: B2_S3_ENDPOINT
+        value: https://s3.us-east-005.backblazeb2.com
+      - key: B2_REGION
+        value: us-east-005
+      - key: MARKETMOO_CORS_ORIGINS
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.12.7
